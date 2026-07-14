@@ -1,0 +1,9 @@
+# Only needed for the live WebSocket paths:
+#   fetch_all.py  (whole-market snapshot)
+#   fetch_vendors.py --live  (streaming vendor updates)
+# The default fetch_vendors.py snapshot uses the standard library only.
+#
+# Install with uv (the Hermes agent venv has no pip):
+#   uv pip install -r requirements.txt
+# Standard environments can instead use:  python -m pip install -r requirements.txt
+websocket-client>=1.6
