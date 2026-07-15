@@ -13,6 +13,10 @@ bank — `<key>` is just the bare item code (`USD`, `gram-altin`); omit
 point's `close` is that day's price (`update_date` is 00:00 Istanbul). Only
 the Serbest Piyasa key populates `open`/`high`/`low`; vendor keys leave them 0.
 
+Vendor names are resolved live, per instrument, from the assets endpoint (via
+doviz_assets.py) — there is no bundled vendor list. The Serbest Piyasa path
+touches neither the vendor list nor the token beyond the archive call itself.
+
 Examples
 --------
     python fetch_history.py EUR --date 2026-07-13                    # Serbest Piyasa
@@ -33,7 +37,8 @@ import urllib.error
 from datetime import datetime, timedelta, timezone
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
-import doviz_token  # noqa: E402
+import doviz_token   # noqa: E402
+import doviz_assets  # noqa: E402
 
 for _stream in (sys.stdout, sys.stderr):
     try:
@@ -41,7 +46,6 @@ for _stream in (sys.stdout, sys.stderr):
     except (AttributeError, ValueError):
         pass
 
-HERE = os.path.dirname(os.path.abspath(__file__))
 ARCHIVE = "https://api.doviz.com/api/v12/assets/{key}/archive?start={start}&end={end}"
 UA = doviz_token.UA
 # Turkey is UTC+3 year-round (no DST since 2016); the API's daily update_date is
@@ -49,52 +53,38 @@ UA = doviz_token.UA
 TR = timezone(timedelta(hours=3))
 DAY = 86400
 
-GOLD_KEYS = {
-    "ons", "gram-altin", "gram-has-altin", "ceyrek-altin", "yarim-altin",
-    "tam-altin", "cumhuriyet-altini", "ata-altin", "14-ayar-altin",
-    "18-ayar-altin", "22-ayar-bilezik", "ikibucuk-altin", "besli-altin",
-    "gremse-altin", "resat-altin", "hamit-altin", "gumus", "gram-platin",
-    "gram-paladyum",
-}
 
+def resolve_vendor_id(name, vendor_id, item):
+    """Return the vendor id string, or None for Serbest Piyasa (no vendor).
 
-def _load(name):
-    try:
-        with open(os.path.join(HERE, name), encoding="utf-8") as fh:
-            return json.load(fh)
-    except (OSError, ValueError):
-        return {}
-
-
-VENDORS = _load("vendors.json")   # {"1": "Akbank", ...}
-SLUGS = _load("slugs.json")       # {"CAD": "kanada-dolari", ...} (for FX validation)
-
-
-def resolve_vendor_id(name, vendor_id):
-    """Return the vendor id string, or None for Serbest Piyasa (no vendor)."""
+    A vendor *name* is matched against this instrument's live vendor list, so
+    only banks/offices that actually quote the item are candidates.
+    """
     if vendor_id is not None:
         return str(vendor_id)
     if not name:
         return None
+    vmap = doviz_assets.vendor_map(doviz_assets.get_asset(item))
     needle = name.lower()
-    matches = [vid for vid, vn in VENDORS.items() if needle in vn.lower()]
+    matches = [vid for vid, vn in vmap.items() if needle in vn.lower()]
     if not matches:
-        sys.exit("Unknown vendor %r (see fetch_vendors.py --list vendors)" % name)
+        sys.exit("Unknown vendor %r for %s (see fetch_vendors.py --list vendors %s)"
+                 % (name, item, item))
     if len(matches) > 1:
-        exact = [vid for vid in matches if VENDORS[vid].lower() == needle]
+        exact = [vid for vid in matches if vmap[vid].lower() == needle]
         if len(exact) == 1:
             return exact[0]
-        sys.exit("Ambiguous vendor %r: %s" % (name, ", ".join(VENDORS[v] for v in matches)))
+        sys.exit("Ambiguous vendor %r: %s" % (name, ", ".join(vmap[v] for v in matches)))
     return matches[0]
 
 
 def resolve_item(item):
     """Return the ITEM token for the asset key (upper ISO code, or gold slug)."""
     raw = item.strip()
-    if raw in GOLD_KEYS:
-        return raw
+    if raw.lower() in doviz_assets.GOLD_KEYS:
+        return raw.lower()
     code = raw.upper()
-    if code in SLUGS or len(code) == 3:
+    if len(code) == 3 and code.isalpha():
         return code
     sys.exit("Unknown item %r (ISO code like USD, or gold key like gram-altin)" % raw)
 
@@ -172,10 +162,16 @@ def main():
     if not args.date and not (args.start and args.end):
         ap.error("give --date, or both --start and --end")
 
-    vid = resolve_vendor_id(args.vendor, args.vendor_id)
+    vid = resolve_vendor_id(args.vendor, args.vendor_id, args.item)
     token_item = resolve_item(args.item)
     key = "%s-%s" % (vid, token_item) if vid is not None else token_item
-    source = VENDORS.get(vid, "vendor-%s" % vid) if vid is not None else "Serbest Piyasa"
+    if vid is None:
+        source = "Serbest Piyasa"
+    else:
+        # Best-effort human name from the instrument's live vendor list (cached
+        # if --vendor already fetched it; one call for the --vendor-id path).
+        source = doviz_assets.vendor_map(doviz_assets.get_asset(args.item)).get(
+            vid, "vendor-%s" % vid)
 
     if args.date:
         try:

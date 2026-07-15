@@ -1,7 +1,7 @@
 ---
 name: doviz-com
 description: "Live, vendor & historical doviz.com FX & gold prices."
-version: 1.2.0
+version: 1.3.0
 author: Hermes Agent
 license: MIT
 platforms: [linux, macos, windows]
@@ -18,9 +18,11 @@ doviz.com publishes live Turkish-market foreign-exchange and gold prices across
 two sibling sites — `kur.doviz.com` (FX) and `altin.doviz.com` (gold). This skill
 ships Python scripts that pull three things: the single **Serbest Piyasa**
 reference price, every **vendor's** (bank / exchange-office) buy/sell for an item,
-and **historical daily** prices. There is no clean public REST price API; the
-scripts wrap doviz.com's HTML tables, a live WebSocket, and a semi-private archive
-API for you. See **Reference** below for how each source works.
+and **historical daily** prices. The scripts wrap doviz.com's live WebSocket plus
+a semi-private JSON API (`api.doviz.com`) for you: one endpoint returns an item's
+type, its whole vendor list, and live bid/ask keyed by the bare item code — so
+**slugs and vendors are derived live, per instrument** (no bundled catalog to go
+stale). See **Reference** below for how each source works.
 
 ## When to Use
 
@@ -39,16 +41,18 @@ For casual "what's X worth" questions without doviz.com specifically, see
 - `scripts/fetch_vendors.py` — per-vendor bid/ask for one item (all vendors, one vendor, or cheapest)
 - `scripts/fetch_history.py` — historical daily close for an item + vendor (single day or range)
 - `scripts/fetch_all.py` — one-shot snapshot of every currency + gold item
-- `scripts/doviz_token.py` — shared helper; derives the archive API's Bearer token
-- `scripts/slugs.json`, `scripts/vendors.json` — bundled item/vendor catalogs
+- `scripts/doviz_assets.py` — shared helper; live per-instrument type + vendor list (`assets/<CODE>`)
+- `scripts/doviz_token.py` — shared helper; derives the API's Bearer token
 - `scripts/requirements.txt` — optional deps for the live-socket paths
 - `templates/starter.js` — WebSocket starter template
 
 ## Procedure
 
-All scripts live in `scripts/`. The default snapshot paths use only the Python
-stdlib; the live-socket paths (`scripts/fetch_all.py`, `scripts/fetch_vendors.py`
-with `--live`) need `websocket-client`. Install it with **uv** — the Hermes agent
+All scripts live in `scripts/`. The default snapshot/history paths use only the
+Python stdlib (they authenticate to `api.doviz.com` with a Bearer token that
+`scripts/doviz_token.py` derives automatically — no key to supply). Only the
+live-socket paths (`scripts/fetch_all.py`, `scripts/fetch_vendors.py` with
+`--live`) need `websocket-client`. Install it with **uv** — the Hermes agent
 venv has no `pip`:
 
 ```bash
@@ -58,8 +62,8 @@ uv pip install -r scripts/requirements.txt   # NOT `pip install` — pip is not 
 **Invoking the scripts — always quote the path and use forward slashes.** The
 terminal is a POSIX shell even on Windows, so unquoted backslashes are eaten
 (`C:\Users\…\x.py` → `C:Users…x.py`, "can't open file"). Forward slashes work on
-every platform, and each script resolves its own bundled data (`slugs.json`,
-`vendors.json`) via `__file__`, so it runs from any working directory:
+every platform, and each script resolves its sibling helpers (`doviz_assets.py`,
+`doviz_token.py`) via `__file__`, so it runs from any working directory:
 
 ```bash
 # Set once to this skill's folder, e.g. on Hermes/Windows:
@@ -77,13 +81,14 @@ python "$SKILL_DIR/scripts/fetch_vendors.py" CAD --vendor Akbank
   bounded monitor that streams N seconds (default 30) then exits.
 
 ```bash
-# Vendor / current prices (stdlib only)
+# Vendor / current prices (stdlib; auto-authenticated, type auto-detected)
 python ".../scripts/fetch_vendors.py" CAD                  # all vendors, CAD/TRY
 python ".../scripts/fetch_vendors.py" CAD --vendor Akbank  # one vendor by name
 python ".../scripts/fetch_vendors.py" CAD --vendor-id 20   # one vendor by id
 python ".../scripts/fetch_vendors.py" CAD --best           # lowest ask
-python ".../scripts/fetch_vendors.py" gram-altin --gold    # gold vendor table
+python ".../scripts/fetch_vendors.py" gram-altin           # gold vendor table (no --gold needed)
 python ".../scripts/fetch_vendors.py" --list currencies    # discoverability
+python ".../scripts/fetch_vendors.py" --list vendors USD   # id → name for one instrument
 python ".../scripts/fetch_vendors.py" CAD --live --live-seconds 20  # watch, then exit
 
 # Whole-market snapshot via one socket join (needs websocket-client)
@@ -117,12 +122,18 @@ on bad input.
   snapshot; `--live` streams and only exits after `--live-seconds`.
 - **Compact JSON on the socket.** Spaces in the auth frame → join `failed`.
 - **Numeric-slug gold keys are not vendor keys.** `14-ayar-altin`,
-  `18-ayar-altin`, `22-ayar-bilezik` start with digits but are items, not
-  `<vendorId>-<ITEM>`. Landing pages contain no vendor keys, so don't filter by a
-  leading-number rule there.
-- **Archive API is picky.** It needs the Bearer token **and** `Origin`/`Referer:
-  https://kur.doviz.com` — miss either and it's 401/403, not an empty result. The
-  token rotates, so re-derive on 401/403 (`doviz_token.get_token(refresh=True)`).
+  `18-ayar-altin`, `22-ayar-bilezik` start with digits but are whole items, not
+  `<vendorId>-<ITEM>`. Pass them as the item as-is (`fetch_vendors.py 14-ayar-altin`);
+  `fetch_all.py`'s landing pages contain no vendor keys, so don't filter by a
+  leading-number rule there either.
+- **Serbest Piyasa is not a vendor.** It is the market reference price (the asset's
+  top level, `source_id 99`) and never appears in the per-vendor list. Don't pass
+  `--vendor "Serbest Piyasa"`; for that series omit `--vendor` in `fetch_history.py`.
+- **The JSON API is picky.** Both `assets/<CODE>` and `assets/<key>/archive` need the
+  Bearer token **and** `Origin`/`Referer: https://kur.doviz.com` **and**
+  `X-Requested-With: XMLHttpRequest` — miss any and it's 401/403, not an empty result.
+  The token rotates, so re-derive on 401/403 (`doviz_token.get_token(refresh=True)`);
+  the scripts do this automatically.
 - **Archive days are Istanbul-midnight.** Bracket a day as `[00:00+03:00, +24h)`
   and label points in UTC+3; a naive UTC date is off by one.
 - **The subprotocol is mandatory.** A WebSocket opened without `"nokta-chat-json"`
@@ -143,9 +154,11 @@ path). Each should print JSON and exit 0:
 
 ```bash
 python ".../scripts/fetch_vendors.py" CAD --vendor Akbank
-#   → one row: {"vendor":"Akbank","vendor_id":1,"item":"CAD","bid":…,"ask":…,…}
-python ".../scripts/fetch_vendors.py" gram-altin --gold --best
-#   → single lowest-ask gold vendor row (key like 1-gram-altin)
+#   → one row: {"vendor_id":1,"vendor":"Akbank","item":"CAD","bid":…,"ask":…,…}
+python ".../scripts/fetch_vendors.py" gram-altin --best
+#   → single lowest-ask gold vendor row (type auto-detected; item "gram-altin")
+python ".../scripts/fetch_vendors.py" --list vendors USD
+#   → {"20":"Kapalıçarşı","1":"Akbank",…} for that instrument only
 python ".../scripts/fetch_history.py" USD --vendor Akbank --date 2020-03-16
 #   → {"date":"2020-03-16", … ,"close":6.598}   (Istanbul-midnight close)
 python ".../scripts/fetch_history.py" EUR --date 2026-07-13
@@ -155,27 +168,38 @@ python ".../scripts/fetch_all.py" --currencies   # needs websocket-client
 ```
 
 If `fetch_all.py`/`--live` reports a missing module, run the `uv pip install` line
-above. If the archive returns 401/403, it self-heals by re-deriving the token.
+above. If the JSON API returns 401/403, the scripts self-heal by re-deriving the token.
 
 ## Reference
 
 ### How the data flows
 ```
-GET https://kur.doviz.com/      ──▶  HTML with data-socket-key cells   (catalog + seed)
-GET https://altin.doviz.com/    ──▶  HTML with data-socket-key cells   (catalog + seed)
+Per-instrument (fetch_vendors.py, fetch_history.py vendor-name lookup):
+GET https://api.doviz.com/api/v12/assets/<CODE>     (Bearer token)
+      ──▶ {asset_type, desktop_url, other_sources:[{asset_key,source_id,source_name,bid,ask}]}
+          └─ type + every vendor + live bid/ask, keyed by the BARE item code (no slug)
+
+History (fetch_history.py):
+GET https://api.doviz.com/api/v12/assets/<key>/archive?start&end   (Bearer token)
+      ──▶ one point/day; <key> = "<vendorId>-<CODE>" or bare "<CODE>" (Serbest Piyasa)
+
+Whole-market snapshot (fetch_all.py):
+GET https://kur.doviz.com/ , https://altin.doviz.com/   ──▶ HTML with data-socket-key cells
                                         │  collect unique data-socket-key values
 wss://socket.doviz.com  (subprotocol nokta-chat-json)
         join room "info@<key1>,<key2>,.../<nick>"
                                         ▼  server streams price ticks
         {"a":"m","m":{ "k":"USD","bid":..,"ask":..,"ts":.. }}   (live)
 ```
-Price cells: `data-socket-key` = item code, `data-socket-attr` = which field
-(`s` headline value, `bid` Alış/buy, `ask` Satış/sell, `c` change %, `a` change
-amount). The HTML gives *what exists* + seed values; the socket gives *live* ticks.
-No API key, login, or cookie for the HTML or socket.
+The `assets/<CODE>` JSON is the per-instrument source: it self-reports the item's
+type and its whole vendor list, so slugs and vendor catalogs are derived live and
+nothing is bundled. `fetch_all.py` still discovers the full catalog from the two
+landing pages' `data-socket-key` cells and reads live ticks off the socket; that
+HTML/socket path needs no key, login, or cookie.
 
 ### Item catalogs
-Discovered by collecting every unique `data-socket-key` from the page HTML.
+`fetch_all.py` discovers the catalog by collecting every unique `data-socket-key`
+from the two landing pages; the per-instrument scripts just take the bare code.
 
 **kur.doviz.com — 63 currencies** (ISO codes = socket keys):
 ```
@@ -199,20 +223,30 @@ gumus              Gram Gümüş          gram-platin      Gram Platin
 gram-paladyum      Gram Paladyum
 ```
 Header ticker keys (`XU100`=BIST100, `d-bitcoin`, `BRENT`) are widgets, not tables.
-`scripts/slugs.json` maps each currency code → detail-page slug (CAD →
-`kanada-dolari`); `fetch_vendors.py --refresh-slugs` rebuilds it from the live site.
+Detail-page slugs are no longer needed — the `assets/<CODE>` API takes the bare
+code — but each asset still reports its own `desktop_url` (e.g. CAD →
+`kur.doviz.com/serbest-piyasa/kanada-dolari`) if a page link is wanted.
 
-### Vendor (bank) prices
-Each item has a **"Banka Kurları"** table listing every vendor's own Alış/Satış, on
-per-item detail pages:
-- **Currency:** `https://kur.doviz.com/serbest-piyasa/<slug>` (CAD → `kanada-dolari`)
-- **Gold:** `https://altin.doviz.com/<product-key>` (`gram-altin`)
+### Asset metadata API (type + vendors, per instrument)
+```
+GET https://api.doviz.com/api/v12/assets/<CODE>
+```
+`<CODE>` is the **bare** item code — an ISO currency (`USD`, `CAD`; case-insensitive)
+or a gold key (`gram-altin`, `14-ayar-altin`). One GET returns that instrument's:
+- `asset_type` — `"C"` currency / `"G"` gold (so `--gold` is unnecessary).
+- `desktop_url` — the detail-page URL (carries the slug, for reference only).
+- `other_sources[]` — the **vendor list**: each entry is one bank/exchange office with
+  `asset_key` (`"<vendorId>-<CODE>"`), `source_id`, `source_name`, and live `bid`/`ask`/
+  `spread`. This is the per-instrument list, so only vendors that actually quote the
+  item appear (e.g. Papara/Hepsipay show for gold but not USD). `Makas` = `ask − bid`;
+  `Makas%` = `makas / bid × 100`.
+- The **top-level** fields are the **Serbest Piyasa** reference (`source_id 99`), which
+  is deliberately absent from `other_sources` — it is the market rate, not a vendor.
 
-Each vendor row carries the vendor name plus `data-socket-key="<vendorId>-<ITEM>"`
-and two priced cells `data-socket-attr="bid"` (Alış) / `="ask"` (Satış). One GET
-returns all vendors. Vendor IDs are **global/consistent** across items (`1`=Akbank,
-`20`=Kapalıçarşı, `23`=Harem, `11`=Merkez Bankası, …); full map in
-`scripts/vendors.json`. `Makas` = `ask − bid`; `Makas%` = `makas / bid × 100`.
+Vendor IDs are **global/consistent** across items (`1`=Akbank, `20`=Kapalıçarşı,
+`23`=Harem, `11`=Merkez Bankası, …). `scripts/doviz_assets.py` wraps this endpoint
+(`get_asset`, `vendors`, `vendor_map`, `asset_type`) and both per-instrument scripts
+use it; **auth is the same Bearer token as the archive API** (below).
 
 ### WebSocket protocol
 | Property | Value |
@@ -256,16 +290,17 @@ item. `templates/starter.js` is a runnable client. Tick (`m`) fields:
 GET https://api.doviz.com/api/v12/assets/<vendorId>-<CODE>/archive?start=<epoch>&end=<epoch>
 ```
 - Asset key is either `<vendorId>-<ITEM>` for a bank/exchange (`1-USD`, `1-gram-altin`,
-  `20-CAD`), or the **bare `<ITEM>` code** for the **Serbest Piyasa** reference series
-  (`USD`, `gram-altin`) — the same key the chart on `kur.doviz.com/serbest-piyasa/<slug>`
-  uses in the background, with no vendor id at all.
+  `20-CAD`) — the same `asset_key` the metadata API's `other_sources` lists — or the
+  **bare `<ITEM>` code** for the **Serbest Piyasa** reference series (`USD`, `gram-altin`),
+  with no vendor id at all.
 - `start`/`end` are Unix **seconds**; returns **one point per day** (a 10-year range
   → ~2996 points). `update_date` = **00:00 Europe/Istanbul** (UTC+3, fixed since 2016).
 - Response: `{"error":false,"data":{"archive":[{update_date, open, highest, lowest,
   close, close_try, close_usd, volume}, …]}}`. For vendor keys only **`close`** (and
   `close_try`) is populated — that day's price; OHLC fields are `0`. The bare
   Serbest Piyasa key is the only one with real `open`/`highest`/`lowest`.
-- **Auth:** `Authorization: Bearer <token>` + `Origin`/`Referer: https://kur.doviz.com`
+- **Auth (shared with `assets/<CODE>`):** `Authorization: Bearer <token>` +
+  `Origin`/`Referer: https://kur.doviz.com` + `X-Requested-With: XMLHttpRequest`
   (no cookies). The token is emitted by an obfuscated but **static, time-independent**
   function on every detail page and **rotates on redeploys**, so
   `scripts/doviz_token.py` derives it live (ported decoder) and caches it, refreshing
@@ -274,7 +309,8 @@ GET https://api.doviz.com/api/v12/assets/<vendorId>-<CODE>/archive?start=<epoch>
 ### Source of truth
 - FX: https://kur.doviz.com/  ·  Gold: https://altin.doviz.com/
 - Live feed: `wss://socket.doviz.com` (subprotocol `nokta-chat-json`), public
+- Metadata + vendors: `https://api.doviz.com/api/v12/assets/<CODE>` (Bearer token)
 - Archive: `https://api.doviz.com/api/v12/assets/<key>/archive` (Bearer token)
-- Catalog + schema last verified **2026-07-14**. Item lists / socket-key spelling can
-  drift — re-scan the HTML `data-socket-key` set (`fetch_vendors.py --refresh-slugs`
-  rewrites `scripts/slugs.json`).
+- Schema last verified **2026-07-16**. Slugs and vendor lists are now fetched live
+  per instrument, so they can't go stale; the socket-key catalog for `fetch_all.py`
+  is still discovered from the landing-page HTML on each run.

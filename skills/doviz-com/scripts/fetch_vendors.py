@@ -1,29 +1,34 @@
 #!/usr/bin/env python3
 """Fetch per-vendor (bank / exchange-office) prices for a doviz.com item.
 
-Each currency and gold product on doviz.com has a "Banka Kurları" table listing
-every vendor that quotes it, with that vendor's own Alış (bid) / Satış (ask).
-One HTTP GET returns the whole table, so both "one vendor" and "all vendors"
-queries come from the same page. No API key, token, or login required.
+Each currency and gold product on doviz.com is quoted by many vendors (banks &
+exchange offices), each with its own Alış (bid) / Satış (ask). doviz.com serves
+that whole per-instrument vendor list as JSON, keyed by the bare item code:
+
+    GET https://api.doviz.com/api/v12/assets/<CODE>   ->  data.other_sources[]
+
+So one request returns every vendor for an item, and both "one vendor" and "all
+vendors" come from the same call. The item's type (currency vs gold) is detected
+automatically. "Serbest Piyasa" is the market reference, not a vendor, so it is
+not listed here (use fetch_history.py without --vendor for that series).
 
 Examples
 --------
-    python fetch_vendors.py CAD                 # all vendors for CAD/TRY
-    python fetch_vendors.py CAD --vendor Akbank # just Akbank
-    python fetch_vendors.py CAD --best          # cheapest ask
-    python fetch_vendors.py gram-altin --gold   # gold vendor table
-    python fetch_vendors.py USD --live          # snapshot, then live socket stream
-    python fetch_vendors.py --list currencies   # what you can ask for
+    python fetch_vendors.py CAD                  # all vendors for CAD/TRY
+    python fetch_vendors.py CAD --vendor Akbank  # just Akbank
+    python fetch_vendors.py CAD --best           # cheapest ask
+    python fetch_vendors.py gram-altin           # gold vendor table (type auto-detected)
+    python fetch_vendors.py USD --live           # snapshot, then live socket stream
+    python fetch_vendors.py --list vendors USD   # id -> name for one instrument
 
-Default output is a JSON array; the snapshot path uses only the stdlib.
-`--live` additionally needs `websocket-client` (see requirements.txt).
+Auth (a static Bearer token) is handled automatically by doviz_token.py.
+The snapshot path uses only the stdlib; `--live` additionally needs
+'websocket-client' (see scripts/requirements.txt).
 """
 import argparse
 import json
 import os
-import re
 import sys
-import urllib.request
 
 # doviz.com content is Turkish; force UTF-8 so Windows consoles don't choke.
 for _stream in (sys.stdout, sys.stderr):
@@ -32,124 +37,11 @@ for _stream in (sys.stdout, sys.stderr):
     except (AttributeError, ValueError):
         pass
 
-HERE = os.path.dirname(os.path.abspath(__file__))
-FX_PAGE = "https://kur.doviz.com/serbest-piyasa/{slug}"
-GOLD_PAGE = "https://altin.doviz.com/{key}"
-MAIN_FX = "https://kur.doviz.com/"
-UA = ("Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
-      "(KHTML, like Gecko) Chrome/124.0 Safari/537.36")
-
-# 19 gold / precious-metal product keys (slug == socket item token).
-GOLD_KEYS = {
-    "ons", "gram-altin", "gram-has-altin", "ceyrek-altin", "yarim-altin",
-    "tam-altin", "cumhuriyet-altini", "ata-altin", "14-ayar-altin",
-    "18-ayar-altin", "22-ayar-bilezik", "ikibucuk-altin", "besli-altin",
-    "gremse-altin", "resat-altin", "hamit-altin", "gumus", "gram-platin",
-    "gram-paladyum",
-}
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+import doviz_assets  # noqa: E402
 
 
-def _load(name):
-    try:
-        with open(os.path.join(HERE, name), encoding="utf-8") as fh:
-            return json.load(fh)
-    except (OSError, ValueError):
-        return {}
-
-
-SLUGS = _load("slugs.json")        # {"CAD": "kanada-dolari", ...}
-VENDORS = _load("vendors.json")    # {"1": "Akbank", ...}
-
-
-def http_get(url):
-    req = urllib.request.Request(url, headers={"User-Agent": UA})
-    with urllib.request.urlopen(req, timeout=20) as resp:
-        return resp.read().decode("utf-8", "replace")
-
-
-def tr_num(text):
-    """Parse a Turkish-locale number ('40.329,81' -> 40329.81)."""
-    text = text.strip().replace(".", "").replace(",", ".")
-    try:
-        return float(text)
-    except ValueError:
-        return None
-
-
-def refresh_slugs():
-    """Rebuild the code->slug map from the live main FX page.
-
-    Pair code<->slug *within each table row* — menus and the header ticker also
-    contain `serbest-piyasa/<slug>` links and `data-socket-key` codes, so a
-    document-wide regex would misalign them.
-    """
-    html = http_get(MAIN_FX)
-    out = {}
-    for row in re.findall(r'<tr[^>]*>(.*?)</tr>', html, re.DOTALL):
-        code = re.search(r'data-socket-key="([A-Z]{3})"', row)
-        slug = re.search(r'serbest-piyasa/([a-z0-9-]+)', row)
-        if code and slug:
-            out.setdefault(code.group(1), slug.group(1))
-    return out
-
-
-def resolve_url(item, force_gold):
-    """Map a user-supplied item to (page_url, human_label)."""
-    raw = item.strip()
-    if force_gold or raw in GOLD_KEYS:
-        if raw not in GOLD_KEYS:
-            sys.exit("Unknown gold product: %s (see --list gold)" % raw)
-        return GOLD_PAGE.format(key=raw), raw
-    code = raw.upper()
-    if code in SLUGS:                       # ISO code, e.g. CAD
-        return FX_PAGE.format(slug=SLUGS[code]), code
-    if raw.lower() in SLUGS.values():       # already a slug, e.g. kanada-dolari
-        return FX_PAGE.format(slug=raw.lower()), raw.lower()
-    sys.exit("Unknown item: %s (try an ISO code like CAD, a gold key like "
-             "gram-altin, or see --list)" % raw)
-
-
-# One vendor row: name inside the <a>, then bid / ask cells keyed <id>-<ITEM>.
-_ROW = re.compile(
-    r'<tr[^>]*>(?P<row>.*?)</tr>', re.DOTALL)
-_NAME = re.compile(r'<a\b[^>]*>(?:\s*<img[^>]*>)?\s*([^<]+?)\s*</a>', re.DOTALL)
-_CELL = re.compile(
-    r'data-socket-key="(\d+)-([^"]+)"\s+data-socket-attr="(bid|ask)"[^>]*>'
-    r'([^<]+)<', re.DOTALL)
-
-
-def parse_vendors(html):
-    """Return [{vendor_id, vendor, item, bid, ask, makas, makas_pct}, ...]."""
-    rows = []
-    for m in _ROW.finditer(html):
-        chunk = m.group("row")
-        cells = _CELL.findall(chunk)
-        if not cells:
-            continue
-        vid = cells[0][0]
-        item = cells[0][1]
-        prices = {attr: tr_num(val) for _id, _it, attr, val in cells}
-        bid, ask = prices.get("bid"), prices.get("ask")
-        if bid is None or ask is None:
-            continue
-        name_m = _NAME.search(chunk)
-        vendor = (name_m.group(1).strip() if name_m
-                  else VENDORS.get(vid, "vendor-%s" % vid))
-        makas = round(ask - bid, 6)
-        makas_pct = round(makas / bid * 100, 4) if bid else None
-        rows.append({
-            "vendor_id": int(vid),
-            "vendor": vendor,
-            "item": item,
-            "bid": bid,
-            "ask": ask,
-            "makas": makas,
-            "makas_pct": makas_pct,
-        })
-    return rows
-
-
-def stream_live(keys, duration=30):
+def stream_live(keys, id2name, duration=30):
     """Join the socket with the parsed vendor keys and print live ticks.
 
     Runs for `duration` seconds then exits cleanly (0 = until Ctrl-C / the server
@@ -161,7 +53,7 @@ def stream_live(keys, duration=30):
                                WebSocketConnectionClosedException)
     except ImportError:
         sys.exit("--live needs the 'websocket-client' package; "
-                 "see requirements.txt for the install command, then retry.")
+                 "see scripts/requirements.txt for the install command, then retry.")
     import random
     import time
     nick = "webkullanici_%d" % random.randint(0, 999)
@@ -173,7 +65,6 @@ def stream_live(keys, duration=30):
                         "data": {"username": "", "password": "", "joinTo": room}},
                        separators=(",", ":")))
     ws.settimeout(3)  # short poll so we can honor `duration` between ticks
-    id2name = {k.split("-", 1)[0]: VENDORS.get(k.split("-", 1)[0], k) for k in keys}
     deadline = time.time() + duration if duration else None
     ticks = 0
     sys.stderr.write("streaming %d vendor keys for %s (Ctrl-C to stop)...\n"
@@ -211,53 +102,53 @@ def main():
     ap = argparse.ArgumentParser(description=__doc__,
                                  formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("item", nargs="?",
-                    help="ISO code (CAD), FX slug (kanada-dolari), or gold key (gram-altin)")
-    ap.add_argument("--gold", action="store_true", help="treat item as a gold product")
+                    help="ISO code (CAD) or gold key (gram-altin)")
+    ap.add_argument("--gold", action="store_true",
+                    help="accepted for compatibility; the type is auto-detected")
     ap.add_argument("--vendor", help="filter to one vendor (case-insensitive substring)")
     ap.add_argument("--vendor-id", type=int,
-                    help="filter to one vendor by numeric id (see --list vendors)")
+                    help="filter to one vendor by numeric id (see --list vendors <item>)")
     ap.add_argument("--best", action="store_true", help="print only the lowest-ask vendor")
     ap.add_argument("--live", action="store_true", help="stream live updates after snapshot")
     ap.add_argument("--live-seconds", type=int, default=30,
                     help="how long --live streams before exiting (0 = until Ctrl-C)")
     ap.add_argument("--list", choices=["currencies", "gold", "vendors"],
-                    help="list what can be queried, then exit")
-    ap.add_argument("--refresh-slugs", action="store_true",
-                    help="rewrite slugs.json from the live site, then exit")
+                    help="list what can be queried, then exit (vendors needs an item)")
     args = ap.parse_args()
 
-    if args.refresh_slugs:
-        data = refresh_slugs()
-        with open(os.path.join(HERE, "slugs.json"), "w", encoding="utf-8") as fh:
-            json.dump(data, fh, ensure_ascii=False, indent=2, sort_keys=False)
-        print("wrote %d currency slugs" % len(data))
-        return
     if args.list:
         if args.list == "currencies":
-            out = SLUGS
+            print(json.dumps(doviz_assets.CURRENCIES, ensure_ascii=False, indent=2))
         elif args.list == "gold":
-            out = sorted(GOLD_KEYS)
-        else:
-            out = VENDORS
-        print(json.dumps(out, ensure_ascii=False, indent=2))
+            print(json.dumps(sorted(doviz_assets.GOLD_KEYS), ensure_ascii=False, indent=2))
+        else:  # vendors — per instrument, so it needs the item
+            if not args.item:
+                ap.error("--list vendors needs an item, e.g. --list vendors USD")
+            data = doviz_assets.get_asset(args.item)
+            print(json.dumps(doviz_assets.vendor_map(data), ensure_ascii=False, indent=2))
         return
+
     if not args.item:
         ap.error("item is required (or use --list)")
 
-    url, _label = resolve_url(args.item, args.gold)
-    rows = parse_vendors(http_get(url))
+    data = doviz_assets.get_asset(args.item)
+    rows = doviz_assets.vendors(data)
     if not rows:
-        sys.exit("No vendor table found at %s" % url)
+        sys.exit("No vendor prices for %s (it may be quoted only as Serbest "
+                 "Piyasa; use fetch_history.py without --vendor for that series)"
+                 % args.item)
 
     if args.vendor_id is not None:
         rows = [r for r in rows if r["vendor_id"] == args.vendor_id]
         if not rows:
-            sys.exit("No vendor with id %d for this item" % args.vendor_id)
+            sys.exit("No vendor with id %d for %s (see --list vendors %s)"
+                     % (args.vendor_id, args.item, args.item))
     elif args.vendor:
         needle = args.vendor.lower()
         rows = [r for r in rows if needle in r["vendor"].lower()]
         if not rows:
-            sys.exit("No vendor matching %r for this item" % args.vendor)
+            sys.exit("No vendor matching %r for %s (see --list vendors %s)"
+                     % (args.vendor, args.item, args.item))
 
     rows.sort(key=lambda r: r["ask"])
     if args.best:
@@ -267,7 +158,7 @@ def main():
 
     if args.live:
         stream_live(["%d-%s" % (r["vendor_id"], r["item"]) for r in rows],
-                    duration=args.live_seconds)
+                    doviz_assets.vendor_map(data), duration=args.live_seconds)
 
 
 if __name__ == "__main__":
