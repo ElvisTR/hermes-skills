@@ -34,14 +34,25 @@ API for you. See **Reference** below for how each source works.
 For casual "what's X worth" questions without doviz.com specifically, see
 `financial-data-queries`. This skill is for doviz.com's structured feeds.
 
+## Bundled Files
+
+- `scripts/fetch_vendors.py` — per-vendor bid/ask for one item (all vendors, one vendor, or cheapest)
+- `scripts/fetch_history.py` — historical daily close for an item + vendor (single day or range)
+- `scripts/fetch_all.py` — one-shot snapshot of every currency + gold item
+- `scripts/doviz_token.py` — shared helper; derives the archive API's Bearer token
+- `scripts/slugs.json`, `scripts/vendors.json` — bundled item/vendor catalogs
+- `scripts/requirements.txt` — optional deps for the live-socket paths
+- `templates/starter.js` — WebSocket starter template
+
 ## Procedure
 
 All scripts live in `scripts/`. The default snapshot paths use only the Python
-stdlib; the live-socket paths (`fetch_all.py`, `fetch_vendors.py --live`) need
-`websocket-client`. Install it with **uv** — the Hermes agent venv has no `pip`:
+stdlib; the live-socket paths (`scripts/fetch_all.py`, `scripts/fetch_vendors.py`
+with `--live`) need `websocket-client`. Install it with **uv** — the Hermes agent
+venv has no `pip`:
 
 ```bash
-uv pip install -r requirements.txt      # NOT `pip install` — pip is not on PATH
+uv pip install -r scripts/requirements.txt   # NOT `pip install` — pip is not on PATH
 ```
 
 **Invoking the scripts — always quote the path and use forward slashes.** The

@@ -65,7 +65,7 @@ paths (`fetch_all.py`, `fetch_vendors.py --live`) need `websocket-client`:
 
 ```bash
 # From the installed skill directory:
-uv pip install -r requirements.txt          # NOT `pip` — the Hermes venv has no pip
+uv pip install -r scripts/requirements.txt  # NOT `pip` — the Hermes venv has no pip
 ```
 
 Always **quote the script path and use forward slashes** — the Hermes terminal is a
