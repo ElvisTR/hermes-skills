@@ -1,21 +1,25 @@
 #!/usr/bin/env python3
-"""Historical (daily) price for a doviz.com item + vendor.
+"""Historical (daily) price for a doviz.com item, by vendor or Serbest Piyasa.
 
 doviz.com detail pages draw their chart from a JSON archive API:
 
-    GET https://api.doviz.com/api/v12/assets/<vendorId>-<CODE>/archive
+    GET https://api.doviz.com/api/v12/assets/<key>/archive
         ?start=<epoch>&end=<epoch>
 
-The asset key is the same `<vendorId>-<ITEM>` used by the vendor tables
-(`1-USD`=Akbank USD, `1-gram-altin`=Akbank gram altın). It returns one point per
-day; each point's `close` is that day's price (`update_date` is 00:00 Istanbul).
+For a vendor, `<key>` is `<vendorId>-<ITEM>` (`1-USD`=Akbank USD). For the
+**Serbest Piyasa** reference price — the single market rate, not tied to any
+bank — `<key>` is just the bare item code (`USD`, `gram-altin`); omit
+`--vendor`/`--vendor-id` to get this. It returns one point per day; each
+point's `close` is that day's price (`update_date` is 00:00 Istanbul). Only
+the Serbest Piyasa key populates `open`/`high`/`low`; vendor keys leave them 0.
 
 Examples
 --------
+    python fetch_history.py EUR --date 2026-07-13                    # Serbest Piyasa
     python fetch_history.py USD --vendor Akbank --date 2020-03-16
     python fetch_history.py USD --vendor Akbank --start 2026-07-07 --end 2026-07-13
     python fetch_history.py gram-altin --vendor Akbank --date 2026-07-13
-    python fetch_history.py CAD --vendor-id 20 --date 2026-07-10   # Kapalıçarşı
+    python fetch_history.py CAD --vendor-id 20 --date 2026-07-10      # Kapalıçarşı
 
 Auth (a static Bearer token) is handled automatically by doviz_token.py.
 Stdlib only.
@@ -67,8 +71,11 @@ SLUGS = _load("slugs.json")       # {"CAD": "kanada-dolari", ...} (for FX valida
 
 
 def resolve_vendor_id(name, vendor_id):
+    """Return the vendor id string, or None for Serbest Piyasa (no vendor)."""
     if vendor_id is not None:
         return str(vendor_id)
+    if not name:
+        return None
     needle = name.lower()
     matches = [vid for vid, vn in VENDORS.items() if needle in vn.lower()]
     if not matches:
@@ -134,11 +141,15 @@ def fetch_archive(key, start, end):
     return list(archive.values()) if isinstance(archive, dict) else list(archive)
 
 
-def shape(point):
+def shape(point, source):
     ud = point.get("update_date")
     return {
         "date": datetime.fromtimestamp(ud, TR).strftime("%Y-%m-%d") if ud else None,
         "update_date": ud,
+        "source": source,
+        "open": point.get("open"),
+        "high": point.get("highest"),
+        "low": point.get("lowest"),
         "close": point.get("close"),
         "close_try": point.get("close_try"),
         "close_usd": point.get("close_usd"),
@@ -150,21 +161,21 @@ def main():
                                  formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("item", help="ISO code (USD) or gold key (gram-altin)")
     g = ap.add_mutually_exclusive_group()
-    g.add_argument("--vendor", help="vendor name, e.g. Akbank (substring match)")
+    g.add_argument("--vendor", help="vendor name, e.g. Akbank (substring match). "
+                                     "Omit for the Serbest Piyasa reference price.")
     g.add_argument("--vendor-id", type=int, help="numeric vendor id")
     ap.add_argument("--date", help="single day, YYYY-MM-DD")
     ap.add_argument("--start", help="range start, YYYY-MM-DD (with --end)")
     ap.add_argument("--end", help="range end, YYYY-MM-DD (inclusive)")
     args = ap.parse_args()
 
-    if not args.vendor and args.vendor_id is None:
-        ap.error("a vendor is required (--vendor NAME or --vendor-id N)")
     if not args.date and not (args.start and args.end):
         ap.error("give --date, or both --start and --end")
 
     vid = resolve_vendor_id(args.vendor, args.vendor_id)
     token_item = resolve_item(args.item)
-    key = "%s-%s" % (vid, token_item)
+    key = "%s-%s" % (vid, token_item) if vid is not None else token_item
+    source = VENDORS.get(vid, "vendor-%s" % vid) if vid is not None else "Serbest Piyasa"
 
     if args.date:
         try:
@@ -181,12 +192,12 @@ def main():
                 else (min(wide, key=lambda p: abs(p["update_date"] - start)) if wide else None)
             if not chosen:
                 sys.exit("No data near %s for %s" % (args.date, key))
-            out = shape(chosen)
+            out = shape(chosen, source)
             out["requested_date"] = args.date
             out["note"] = "nearest available trading day"
             print(json.dumps(out, ensure_ascii=False, indent=2))
         else:
-            print(json.dumps(shape(pts[0]), ensure_ascii=False, indent=2))
+            print(json.dumps(shape(pts[0], source), ensure_ascii=False, indent=2))
         return
 
     try:
@@ -198,7 +209,7 @@ def main():
         sys.exit("--start must not be after --end")
     start, _ = day_bounds(s)
     _, end = day_bounds(e)
-    rows = [shape(p) for p in fetch_archive(key, start, end)]
+    rows = [shape(p, source) for p in fetch_archive(key, start, end)]
     # Clip to the requested calendar range (the API may include today's live
     # point or a boundary day just outside [start, end]).
     lo, hi = args.start, args.end

@@ -1,7 +1,7 @@
 ---
 name: doviz-com
 description: "Live, vendor & historical doviz.com FX & gold prices."
-version: 1.1.0
+version: 1.2.0
 author: Hermes Agent
 license: MIT
 platforms: [linux, macos, windows]
@@ -79,7 +79,8 @@ python ".../scripts/fetch_vendors.py" CAD --live --live-seconds 20  # watch, the
 python ".../scripts/fetch_all.py"                    # every item
 python ".../scripts/fetch_all.py" --currencies       # or --gold : filter by type
 
-# Historical daily prices for an item + vendor (stdlib only)
+# Historical daily prices: Serbest Piyasa (no vendor) or a specific vendor (stdlib only)
+python ".../scripts/fetch_history.py" EUR --date 2026-07-13                   # Serbest Piyasa
 python ".../scripts/fetch_history.py" USD --vendor Akbank --date 2020-03-16
 python ".../scripts/fetch_history.py" USD --vendor Akbank --start 2026-07-07 --end 2026-07-13
 python ".../scripts/fetch_history.py" gram-altin --vendor Akbank --date 2026-07-13
@@ -88,6 +89,9 @@ python ".../scripts/fetch_history.py" CAD --vendor-id 20 --date 2026-07-10
 
 Items are ISO codes (`USD`, `CAD`) or gold product keys (`gram-altin`); vendors are
 a name (`--vendor Akbank`, case-insensitive substring) or an id (`--vendor-id 1`).
+In `fetch_history.py`, omitting both `--vendor` and `--vendor-id` fetches the
+**Serbest Piyasa** reference series instead of a bank's — the only history source
+that also has real `open`/`high`/`low` (vendor points leave them `0`).
 A `--date` on a market-closed day returns the nearest prior trading day, flagged
 with a `note`. All scripts print JSON and exit non-zero with an actionable message
 on bad input.
@@ -133,6 +137,8 @@ python ".../scripts/fetch_vendors.py" gram-altin --gold --best
 #   → single lowest-ask gold vendor row (key like 1-gram-altin)
 python ".../scripts/fetch_history.py" USD --vendor Akbank --date 2020-03-16
 #   → {"date":"2020-03-16", … ,"close":6.598}   (Istanbul-midnight close)
+python ".../scripts/fetch_history.py" EUR --date 2026-07-13
+#   → {"date":"2026-07-13","source":"Serbest Piyasa","open":…,"high":…,"low":…,"close":…}
 python ".../scripts/fetch_all.py" --currencies   # needs websocket-client
 #   → JSON array of ~63 currency items with numeric bid/ask/last
 ```
@@ -238,12 +244,16 @@ item. `templates/starter.js` is a runnable client. Tick (`m`) fields:
 ```
 GET https://api.doviz.com/api/v12/assets/<vendorId>-<CODE>/archive?start=<epoch>&end=<epoch>
 ```
-- Asset key = the same `<vendorId>-<ITEM>` (`1-USD`, `1-gram-altin`, `20-CAD`).
+- Asset key is either `<vendorId>-<ITEM>` for a bank/exchange (`1-USD`, `1-gram-altin`,
+  `20-CAD`), or the **bare `<ITEM>` code** for the **Serbest Piyasa** reference series
+  (`USD`, `gram-altin`) — the same key the chart on `kur.doviz.com/serbest-piyasa/<slug>`
+  uses in the background, with no vendor id at all.
 - `start`/`end` are Unix **seconds**; returns **one point per day** (a 10-year range
   → ~2996 points). `update_date` = **00:00 Europe/Istanbul** (UTC+3, fixed since 2016).
 - Response: `{"error":false,"data":{"archive":[{update_date, open, highest, lowest,
   close, close_try, close_usd, volume}, …]}}`. For vendor keys only **`close`** (and
-  `close_try`) is populated — that day's price; OHLC fields are `0`.
+  `close_try`) is populated — that day's price; OHLC fields are `0`. The bare
+  Serbest Piyasa key is the only one with real `open`/`highest`/`lowest`.
 - **Auth:** `Authorization: Bearer <token>` + `Origin`/`Referer: https://kur.doviz.com`
   (no cookies). The token is emitted by an obfuscated but **static, time-independent**
   function on every detail page and **rotates on redeploys**, so
